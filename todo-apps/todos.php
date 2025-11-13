@@ -12,24 +12,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $status = $_POST['status'];
     $priority = $_POST['priority'];
     $notifications = isset($_POST['notifications']) ? 1 : 0;
-    $due_date = $_POST['due_date'] ?: null;
-    $category_id = $_POST['category_id'] ?: null;
-    $attachment = '';
-
-    if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] == 0) {
-        $file = $_FILES['attachment'];
-        $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-        if (in_array($ext, ['pdf', 'jpg', 'jpeg', 'png']) && $file['size'] < 5000000) {
-            $attachment = "uploads/" . time() . "_" . $file['name'];
-            move_uploaded_file($file['tmp_name'], $attachment);
-        }
-    }
+    $due_date = !empty($_POST['due_date']) ? $_POST['due_date'] : null;
+    $tags = !empty($_POST['tags']) ? implode(',', array_map('trim', explode(',', $_POST['tags']))) : null;
 
     if ($_POST['action'] === 'add') {
-        $stmt = $pdo->prepare("INSERT INTO todos (user_id, category_id, title, description, status,
-            priority, notifications, due_date, attachment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$user_id, $category_id, $title, $desc, $status, $priority, $notifications,
-            $due_date, $attachment]);
+        // include due_date and tags in INSERT
+        $stmt = $pdo->prepare("INSERT INTO todos (user_id, category_id, title, description, status, priority, notifications, due_date, attachment, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$user_id, $category_id, $title, $desc, $status, $priority, $notifications, $due_date, $attachment, $tags]);
+        $result = ['success' => true, 'message' => 'Added'];
     } elseif ($_POST['action'] === 'edit') {
         $id = $_POST['id'];
 
@@ -46,12 +36,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             simulate_email($email, "Task Done!", "Task '$title' completed!");
         }
 
+        // include due_date and tags in UPDATE (preserve old attachment if needed)
         $stmt = $pdo->prepare("UPDATE todos SET category_id=?, title=?, description=?, status=?,
-            priority=?, notifications=?, due_date=?, attachment=? WHERE id=? AND user_id=?");
+            priority=?, notifications=?, due_date=?, attachment=?, tags=? WHERE id=? AND user_id=?");
         $stmt->execute([
             $category_id, $title, $desc, $status, $priority, $notifications, $due_date,
-            $attachment ?: $old['attachment'], $id, $user_id
+            $attachment ?: ($old['attachment'] ?? ''), $tags, $id, $user_id
         ]);
+        $result = ['success' => true, 'message' => 'Updated'];
     }
     header("Location: todos.php");
     exit;
@@ -130,6 +122,24 @@ $cats = $cat_stmt->fetchAll();
     <meta charset="UTF-8">
     <title>TODOs</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+    .tag {
+        font-size: 0.8rem;
+        margin-right: 0.3rem;
+    }
+    .countdown {
+        font-size: 0.9rem;
+        font-weight: 500;
+    }
+    .countdown.text-danger {
+        animation: blink 2s infinite;
+    }
+    @keyframes blink {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+    </style>
 </head>
 <body>
     <?php include 'navbar.php'; ?>
@@ -163,6 +173,15 @@ $cats = $cat_stmt->fetchAll();
             <div class="col-md-2">
                 <button class="btn btn-primary w-100">Filter</button>
             </div>
+            <div class="col-md-2">
+                <a href="export_csv.php?<?= http_build_query([
+                    'search' => $_GET['search'] ?? '',
+                    'status' => $_GET['status'] ?? '',
+                    'category' => $_GET['category'] ?? ''
+                ]) ?>" class="btn btn-outline-secondary w-100">
+                    Export CSV
+                </a>
+            </div>
         </form>
 
         <button class="btn btn-success mb-3" data-bs-toggle="modal" data-bs-target="#addModal">+ Add Task</button>
@@ -172,19 +191,32 @@ $cats = $cat_stmt->fetchAll();
             <thead>
                 <tr>
                     <th>Title</th>
+                    <th>Tags</th>
                     <th>Status</th>
-                    <th>Due</th>
+                    <th>Due Date</th>  <!-- Changed from "Due" to "Due Date" -->
                     <th>File</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($todos)): ?>
-                    <tr><td colspan="5" class="text-center text-muted">No tasks found.</td></tr>
+                    <tr><td colspan="6" class="text-center text-muted">No tasks found.</td></tr>
                 <?php else: ?>
                     <?php foreach ($todos as $t): ?>
                     <tr>
                         <td><?= htmlspecialchars($t['title']) ?></td>
+                        <td>
+                            <?php
+                            if (!empty($t['tags'])) {
+                                $parts = array_filter(array_map('trim', explode(',', $t['tags'])));
+                                foreach ($parts as $p) {
+                                    echo '<span class="badge bg-secondary me-1">' . htmlspecialchars($p) . '</span>';
+                                }
+                            } else {
+                                echo '—';
+                            }
+                            ?>
+                        </td>
                         <td>
                             <span class="badge bg-<?= 
                                 $t['status'] === 'completed' ? 'success' : 
@@ -193,7 +225,13 @@ $cats = $cat_stmt->fetchAll();
                                 <?= ucfirst(str_replace('_', ' ', $t['status'])) ?>
                             </span>
                         </td>
-                        <td><?= $t['due_date'] ?: '—' ?></td>
+                        <td>
+                            <?php if (!empty($t['due_date'])): ?>
+                                <span class="countdown" data-due="<?= htmlspecialchars($t['due_date']) ?>"></span>
+                            <?php else: ?>
+                                —
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <?= $t['attachment'] 
                                 ? '<a href="' . htmlspecialchars($t['attachment']) . '" target="_blank">View</a>' 
@@ -283,7 +321,51 @@ $cats = $cat_stmt->fetchAll();
         document.querySelector('#editModal [name="notifications"]').checked = t.notifications == 1;
         document.querySelector('#editModal [name="due_date"]').value = t.due_date || '';
         document.querySelector('#editModal [name="category_id"]').value = t.category_id || '';
+        // ADDED: populate tags field
+        document.querySelector('#editModal [name="tags"]').value = t.tags || '';
     }
+
+    function updateCountdowns() {
+        document.querySelectorAll('.countdown').forEach(el => {
+            const due = el.dataset.due;
+            if (!due) return;
+            
+            const dueDate = new Date(due + 'T23:59:59');  // End of due date
+            const now = new Date();
+            const diff = dueDate - now;
+            
+            if (diff < 0) {
+                // Overdue
+                el.textContent = 'Overdue';
+                el.className = 'countdown text-danger fw-bold';
+            } else {
+                // Calculate remaining time
+                const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                
+                let text = '';
+                if (days > 0) text += `${days}d `;
+                if (hours > 0) text += `${hours}h `;
+                if (minutes > 0) text += `${minutes}m`;
+                
+                el.textContent = text || 'Less than 1m';
+                
+                // Style based on urgency
+                if (days === 0) {
+                    el.className = 'countdown text-danger';  // Due today
+                } else if (days <= 3) {
+                    el.className = 'countdown text-warning';  // Due soon
+                } else {
+                    el.className = 'countdown text-muted';  // Due later
+                }
+            }
+        });
+    }
+
+    // Update every minute
+    setInterval(updateCountdowns, 60000);
+    updateCountdowns(); // Initial update
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
